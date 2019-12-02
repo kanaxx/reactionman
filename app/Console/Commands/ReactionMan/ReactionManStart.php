@@ -27,8 +27,8 @@ class ReactionManStart extends Command
     protected $description = 'Slackのリアクションを集計してレポートするかわいいやつ';
 
     
-    private $userToken = 'xoxp-472869539026-776575745840-854667009808-874305d45b86c2cb9b277d622351f407';
-    private $botToken = 'xoxb-472869539026-856874655382-2VbFvIgnBkBacJfotu42GqoC';
+    private $userToken = 'xoxp-472869539026-xx';
+    private $botToken = 'xoxb-472869539026-yy';
 
     const API_USER_URL = 'https://slack.com/api/users.list';
     const API_CHANNELLIST_URL= 'https://slack.com/api/conversations.list';
