@@ -15,8 +15,9 @@ class ReactionManStart extends Command
         {--days= : 集計日数}
         {--start= : 集計の開始日 2019-11-11形式}
         {--end= : 集計の終了日 2019-11-11形式}
-        {--channel= : 集計対象チャネル}
-        {--sendto= : 通知先チャンネル名(publicのみ)}
+        {--channel= : 集計対象チャネル(publicのみ)}
+        {--sendto= : 通知先チャンネル名(publicのみ).指定がないときは結果をPostしないで終わる}
+        {--token= : 結果をpostMessage可能なユーザトークン}
         ' ;
 
     /**
@@ -25,10 +26,6 @@ class ReactionManStart extends Command
      * @var string
      */
     protected $description = 'Slackのリアクションを集計してレポートするかわいいやつ';
-
-    
-    private $userToken = 'xoxp-472869539026-xx';
-    private $botToken = 'xoxb-472869539026-yy';
 
     const API_USER_URL = 'https://slack.com/api/users.list';
     const API_CHANNELLIST_URL= 'https://slack.com/api/conversations.list';
@@ -56,6 +53,12 @@ class ReactionManStart extends Command
         ini_set('xdebug.var_display_max_data', -1);
         ini_set('xdebug.var_display_max_depth', -1);
 
+        $token = $this->option('token');
+        if( blank($token) ){
+            $this->error('parameter [token] is mandatory.');
+            return 1;
+        }
+        
         $days = $this->option('days');
         if( !blank($days) ){
             $latest = strtotime( date("Y/m/d 00:00:00") );
@@ -65,8 +68,8 @@ class ReactionManStart extends Command
         }else{
             $latest_date = $this->option('end');
             $oldest_date = $this->option('start');
-            if( $latest_date == FALSE || $oldest_date == FALSE){
-                $this->error("illegal parameter start/end");
+            if( blank($latest_date) || blank($oldest_date)){
+                $this->error("parameter [start/end] or [days] is mandatory.");
                 return 1;
             }
             $latest_date = $latest_date . ' 23:59:59';
@@ -79,36 +82,41 @@ class ReactionManStart extends Command
         $this->info("from: $oldest_date to: $latest_date");
         $this->info("from: $oldest to: $latest");
 
+        //httpの設定
         $httpOption = ['verify' => false, 'debug'=>false, 'http_errors'=>false, ];
-        $httpOption['headers'] = ['Authorization'=>"Bearer " . $this->userToken];
+        $httpOption['headers'] = ['Authorization'=>"Bearer " . $token];
         $guzzle = new \GuzzleHttp\Client($httpOption);
 
-        $slackChannelList = $this->getSlackChannels($guzzle, $this->userToken);
+        //slackのチャンネル一覧(public channel)
+        $slackChannelList = $this->getSlackChannels($guzzle, $token);
         $this->info("All Channel in Slack: {$slackChannelList->count()}");
-        
-        $optSendTo = $this->option('sendto');
-        $sendTo = $slackChannelList->firstWhere('name', $optSendTo);
-        if( blank($sendTo) ) {
-            $this->error("send to channel not found.  $optSendTo");
-            return 1;
-        }
 
+        //指定したチャンネルがないときはエラー
         $optChannel = $this->option('channel');
         $slackChannel = $slackChannelList->firstWhere('name', $optChannel);
 
-        //指定したチャンネルがないときはエラー
         if( blank($slackChannel) ){
-            $this->error("'--channel' {$optChannel} is not found");
+            $this->error("parameter [channel] {$optChannel} is not found in your slack workspace." );
             return 1;
         }
 
-        $slackUserList = $this->getSlackUsers($guzzle, $this->userToken);
+        //送り先がないときは、エラーにせず先に進む。postはしない
+        $optSendTo = $this->option('sendto');
+        $sendTo = $slackChannelList->firstWhere('name', $optSendTo);
+        if( blank($sendTo) ) {
+            $this->info("parameter [sendto] is not found. ReactionMan will not post message to slack.");
+        }
+
+        //slackのユーザ一覧
+        $slackUserList = $this->getSlackUsers($guzzle, $token);
         $this->info("All User in Slack: " . count($slackUserList));
 
-        $reactionManChannel = new ReactionManChannel($slackChannel['id'], $slackChannel['name']);
-
-        $slackMessageList = $this->getSlackMassages($guzzle,$this->userToken,$slackChannel['id'],$latest,$oldest);
+        //メッセージ取得
+        $slackMessageList = $this->getSlackMassages($guzzle,$token,$slackChannel['id'],$latest,$oldest);
         $this->info( " " . count($slackMessageList) . " msgs in {$slackChannel['name']}.");
+
+        //チャンネルの結果をサマリーするクラス
+        $reactionManChannel = new ReactionManChannel($slackChannel['id'], $slackChannel['name']);
 
         foreach($slackMessageList as $m=>$message){
             if( !isset($message['user']) || !isset($message['reactions']) ){
@@ -141,6 +149,7 @@ class ReactionManStart extends Command
         $this->info( " " . count($slackMessageList) . " msgs, {$reactionManChannel->countReaction()} reactions in {$slackChannel['name']}.");
 
 
+        //全部終わったらSlackのメッセージ作る
         $slackMessageBuilder = new SlackMessageBuilder();
         $slackMessageBuilder->oldest = $oldest;
         $slackMessageBuilder->latest = $latest;
@@ -148,15 +157,22 @@ class ReactionManStart extends Command
         $slackMessageBuilder->reactionManChannel = $reactionManChannel;
         
         $slackPayload = $slackMessageBuilder->getSlackMessage();
-        // \Log::info(json_encode($slackPayload,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
 
-        //チャンネルはIDで指定（チャンネル名ではないので注意）
-        $slackPayload['channel']=$sendTo['id'];
-        $slackPayload['as_user']=false;
+        //sendtoが正しいときだけSlackに送る。それ以外はコンソールにダンプして終わる
+        if( !blank($sendTo) ) {
+            $this->info('Post message to slack');
 
-        $response = $guzzle->post(self::API_CHATPOST_URL, ['json'=>$slackPayload]);
-        $body = $response->getBody()->getContents();
-        $this->line('post api :' . $body);
+            //チャンネルはIDで指定（チャンネル名ではないので注意）
+            $slackPayload['channel']=$sendTo['id'];
+            $slackPayload['as_user']=false;
+            $response = $guzzle->post(self::API_CHATPOST_URL, ['json'=>$slackPayload]);
+            $body = $response->getBody()->getContents();
+            $this->line('post api :' . $body);
+        }else{
+            $this->info('Only dump slack message payload');
+            $json = json_encode($slackPayload, JSON_PRETTY_PRINT |JSON_UNESCAPED_SLASHES |JSON_UNESCAPED_UNICODE);
+            $this->line($json);
+        }
         $this->info( "end of batch.");
         return 0;
     }
